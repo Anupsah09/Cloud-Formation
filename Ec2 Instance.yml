@@ -1,0 +1,241 @@
+ AWSTemplateFormatVersion: 2010-09-09
+Description: My Network Environment
+
+Parameters:
+  InstanceType:
+    Default: t2.micro
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    AllowedValues: [t2.micro]
+
+  SSHLocation:
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    Default: 0.0.0.0/0
+    Description: The IP address range that can be used to access the web server using SSH.  
+    Type: String
+
+Resources:
+  # VPC containing 4 subnets, 2 is public, while the other 2 are private
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+        CidrBlock: 10.0.0.0/16
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+        InstanceTenancy: default
+        Tags:
+          - Key: Name
+            Value: my-vpc
+  
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: my-public-subnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: my-public-subnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: my-private-subnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: my-private-subnet2
+
+  # Setup connectivity by creating an internet GW + NAT
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: my-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref MyVPC
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  # Create private routing table that connects the private subnets to the NAT
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: rt-private
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  Private1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  Private2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # Create a public routing table that connects the public subnet to the IGW
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+      Tags:
+        - Key: Name
+          Value: rt-to-igw
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  Public1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  Public2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  ProfileServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: profile-service-sg
+      GroupDescription: Allow https/https/ssh to client host
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Profile service security group
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH Security Group on port 22
+      SecurityGroupIngress:
+  
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: !Ref SSHLocation
+      Tags:
+        - Key: Name
+          Value: SSH Security Group
+      VpcId: !Ref MyVPC
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP/HTTPS access via port 80/443 locked down to the load
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        SourceSecurityGroupId: !Ref ProfileServiceSecurityGroup
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        SourceSecurityGroupId: !Ref ProfileServiceSecurityGroup
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        SourceSecurityGroupId: !Ref SSHSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Web Server Security Group
+      VpcId: !Ref MyVPC
+
+  # Create an EC2 Instance
+  MyEC2:
+    Type: AWS::EC2::Instance
+    Properties: 
+      SubnetId: !Ref PublicSubnet1
+      InstanceType: t2.micro
+      ImageId: ami-059af0b76ba105e7e
+      SecurityGroupIds: 
+        - !Ref WebServerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Ec2 test
+
+Outputs:
+  PrivateSubnet1:
+    Description: Private Subnet ID 1
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: Private Subnet ID 2
+    Value: !Ref PrivateSubnet2
+
+  ProfileServiceSecurityGroup:
+    Description: Security group for the lambda service
+    Value: !Ref ProfileServiceSecurityGroup  
+
+  MyEC2:
+    Description: InstanceId of the EC2 instance
+    Value: !Ref MyEC2
